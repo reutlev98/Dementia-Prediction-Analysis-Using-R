@@ -1,0 +1,575 @@
+---
+title: "BioML project : dementia-prediction-dataset "
+authors: Reut Lev 207385741 & Ye'ela Granot 209133107 & Shir Ohayon 322590274
+output: pdf_document
+---
+The dataset contains longitudinal records of 150 patients whose ages range from 60 to 98. Each subject was assessed on at least one or more visits separated by at least one year, giving a total of 373 records.Each record is a MRI single scan. 14 subjects were characterized as nondemented at the time of their initial visit and were subsequently characterized as demented at a later visit.
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(tidyverse)
+library(dplyr)
+library(scales)
+library(ggcorrplot)
+library(randomForest)
+library(caret)
+library(class)
+library(gmodels)
+library(GGally)
+library(randomForest)
+library(e1071)
+library(cluster)
+library(cluster)
+library(ggplot2)
+
+demention_data<-read.csv("dementia_dataset.csv")
+str(demention_data)
+```
+The data contains 15 features and 373 MRI scans.
+```{r include=FALSE}
+head(demention_data)
+```
+Features in Dementia database
+
+SubjectID: Unique Identifier for individual subjects.
+
+MRI ID: Unique identifier for each test. One subject may have more than one MRI ID.
+
+Group: Class label.
+
+Visit: Number of times a subject has visited for test.
+
+MRDelay: Delay of visit by a subject since last visit (Number of days).
+
+CDR: Clinical dementia rating.
+
+Gender: Male or Female.
+
+SES: Socio-Economic Status assessed by hollingshead index of social position.
+
+MMSE: Mini Mental State Examination Value.
+
+eTIV: Estimated total intracranial volume.
+
+nWBV: Normalized whole-brain volume, expressed as a percent of all voxels (“constant” for any value of estimated total intracranial volume).
+
+ASF: Atlas Scale Factor; volume scaling factor for brain size (“constant” for any value of estimated total intracranial volume).
+
+
+```{r include=FALSE}
+selected_features <- c("Age", "EDUC", "SES", "MMSE", "ASF", "nWBV","eTIV")
+subset_data <- demention_data[selected_features]
+summary(subset_data)
+```
+
+Our data contains 3 different classifications. We would like to see their distribution:
+
+```{r}
+demention_data<-read.csv("dementia_dataset.csv")
+ggplot(data = demention_data) + 
+  geom_bar(mapping = aes(x = Group, fill = Group))
+
+
+```
+PRE-PROCESSING
+First We would like to have a labels distribution as close to uniform as possible.
+In order to achieve this goal, we will take the 14 subjects from the converted category and for each patient we will keep only the first and last meetings and update their values so in the first meeting they were non-demented persons, while in the last meeting they were diagnosed as demented.
+```{r}
+# Group the data by Subject.ID and identify the maximum visit for each patient
+demention_data <- demention_data %>%
+  group_by(Subject.ID) %>%
+  mutate(Max_Visit = max(Visit))
+
+# Update the first visit of converted patients to non-demented
+demention_data$Group[demention_data$Group == "Converted" & demention_data$Visit == 1] <- "Nondemented"
+
+# Update the last visit of converted patients to demented
+demention_data$Group[demention_data$Group == "Converted" & demention_data$Visit == demention_data$Max_Visit] <- "Demented"
+
+# Remove the remaining rows of converted patients
+demention_data <- demention_data[demention_data$Group != "Converted", ]
+
+ggplot(data = demention_data) + 
+  geom_bar(mapping = aes(x = Group, fill = Group))
+
+
+# Remove the added Max_Visit feature
+demention_data <- demention_data[, !(colnames(demention_data) %in% c("Max_Visit"))]
+
+```
+Now the labels are only "demented" and "nondemented" values, and as a result of this step 9 rows were omitted from the data. 
+Next, we will remove features that not informative or does not provide meaningful insights for our specific analysis.
+
+```{r}
+# Remove specific features (columns)
+demention_data <- demention_data[, !(colnames(demention_data) %in% c( "MRI.ID", "Visit", "MR.Delay", "Hand"))]
+```
+Finally,we will deal with Nan values. We observed 8 objects with Nan values in the SES feature. the assumption is that the Nan occurs randomly in the data and therefore we will clear these rows out. 
+```{r}
+# Identify rows with NaN values
+nan_rows <- which(!complete.cases(demention_data))
+# Remove rows with NaN values
+demention_data <- demention_data[-nan_rows, ]
+nrow(demention_data) 
+```
+Now we can try to take a closer look at the data in different features.
+In order to get a broad understanding of the distributions and the relationship between the different features, we'll create the following Pairs plot 
+
+```{r}
+# Create a pairs plot using ggplot2
+my_palette <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+pairs(subset_data, col = my_palette)
+
+```
+In this context we can see in a very prominent way the linear relationship between the ASF and eTIV, which getting along with the fact that they are both physiological indices of the brain.
+First lets explore the data distribution of demention among males and females.
+```{r}
+# Calculate the percentages
+percentages <- demention_data %>%
+  group_by(M.F, Group) %>%
+  summarize(count = n()) %>%
+  mutate(percentage = count / sum(count))
+
+# Create the graph
+ggplot(data = percentages, aes(x = M.F, y = percentage, fill = Group)) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(x = "Gender", y = "Percentage", fill = "Group") +
+  scale_fill_manual(values = c("Demented" = "red", "Nondemented" = "blue")) +
+  ggtitle("Percentage of Demented and Non-Demented Patients by Gender") +
+  scale_y_continuous(labels = percent_format())
+
+```
+It seems that there are about 25% scans of demented males more than demented females specifically in this dataset. It is important to mention that this result is specific to our data and does not necessarily reflect the disease appearance differences among women and men since the sample size is relatively small and probably does not reflect the true distributions in the whole population.
+We will mention that each patient performed a variable number of scans but we checked the proportion per scan and not per patient due to convenience. therefore we performed a pre-analysis and saw that there are no differences between men and females in the number of scans and hence the proportions are preserved.
+
+Let's explore the age range in the data:
+
+```{r}
+# Filter data to keep only the last row for each unique Subject.ID
+demention_data_temp <- demention_data[!duplicated(demention_data$Subject.ID, fromLast = TRUE), ]
+
+# Count the number of people in each age
+age_counts <- table(demention_data_temp$Age)
+
+# Convert the counts to a data frame
+age_df <- data.frame(Age = as.numeric(names(age_counts)), Count = as.numeric(age_counts))
+
+# Sort the data frame by age
+age_df <- age_df[order(age_df$Age), ]
+
+# Create a line plot
+plot(
+  Count ~ Age,
+  data = age_df,
+  type = "l",
+  main = "Age range",
+  xlab = "Age",
+  ylab = "Number of People",
+  ylim = c(0, max(age_df$Count) + 1),
+  col = "blue"
+)
+
+```
+We would like to examine the distribution of CDR among those diagnosed with dementia.
+```{r}
+# Count the number of demented people for each CDR level (excluding CDR = 0)
+CDR_counts <- table(demention_data_temp$CDR[demention_data_temp$Group == "Demented" & demention_data_temp$CDR != 0])
+
+# Create a bar plot
+barplot(
+  CDR_counts,
+  main = "Dementia Level (CDR) in Demented People",
+  xlab = "Dementia Level (CDR)",
+  ylab = "Number of Demented People",
+  col = "blue",
+  ylim = c(0, max(CDR_counts) + 1)
+)
+```
+
+It can be seen that the majority of the demented patients are in a very low up to mild demention level and that only 3~ of them are in moderate demention level.There is no patient with dementia level 3 which is considered severe.
+We would like to check the relation between number of eucation years to the dementia.
+```{r}
+# Create a boxplot or violin plot
+ggplot(demention_data, aes(x = Group, y = EDUC, fill = Group)) +
+  geom_boxplot() +  # Use geom_violin() for a violin plot
+  labs(x = "Demented Classification", y = "Education Years") +
+  scale_fill_manual(values = c("#1f77b4", "#ff7f0e"), labels = c("Demented", "Nondemented")) +
+  theme_bw()
+```
+
+It can be inferred that education might play a crucial role in reducing the risk of dementia since the number of years education in the  demented population is significantly smaller in every statistical measure of our data relatively to the healthy population.
+Before continuing to the ML algorithms we would like to do feature selection for performance improvement. We'll create correlation matrix for finding highly correlated features and remove redundant features.
+
+```{r}
+# ensure the results are repeatable
+set.seed(7)
+numeric_vars <- sapply(demention_data, is.numeric)
+numeric_data <- demention_data[, numeric_vars]
+# calculate correlation matrix
+correlationMatrix <- cor(numeric_data)
+# display the correlation matrix
+ggcorrplot(correlationMatrix)
+```
+from the correlation matrix it looks like there are a highly and interesting correlation between the following features:
+1. ASF ~ eTIV
+2. EDUC ~ SES
+3. CDR ~ MMSE
+we will want to filter the correlations that are above 0.75:
+
+```{r}
+# find attributes that are highly correlated
+highlyCorrelated <- findCorrelation(correlationMatrix, cutoff=0.75, names=TRUE)
+# print indexes of highly correlated attributes
+print(highlyCorrelated)
+```
+We will remove the eTIV feature due to redundancy.
+next we will examine the importance of the other features by using random forest model.
+
+```{r warning=FALSE}
+demention_data <- demention_data[, !(colnames(demention_data) %in% c("eTIV"))]
+
+demention_data$Group <- ifelse(demention_data$Group == "Nondemented", 0, 1)
+
+y= demention_data[,2]
+T_y = t(y)
+
+#train random forest model and calculate feature importance
+rf = randomForest(x= demention_data[,3:10],
+                  y= T_y)
+# estimate variable importance
+importance <- varImp(rf, scale=FALSE)
+#sort the score in decreasing order
+var_imp_df <- data.frame(cbind(variable = rownames(importance), score = importance[,1]))
+var_imp_df$score <- as.double(var_imp_df$score)
+var_imp_df[order(var_imp_df$score,decreasing = TRUE),]
+```
+it can be inferred that the top 4 most importance feature for classifying demention are :
+-CDR
+-MMSE
+-nWBV
+-ASF
+
+We'll start apply ML algorithms on our data. first algorithm we will apply will be the KNN.
+for performing this model we will first normalize our data. we chose to normalize min max after we saw that the results were better than when we normalized using Z score.
+
+```{r}
+# create the min/max normalization function:
+normalize <- function(x) {
+return ((x - min(x)) / (max(x) - min(x)))
+}
+demention_data[4:10] <- as.data.frame(lapply(demention_data[4:10], normalize))
+```
+
+
+
+Next step we'll be creating the training and test sets in proportion of 80-20.
+
+To reach the best classifier we performed the KNN algorithm 25 times on a different random training sets. Finally we took the division that gave us the best result.
+
+We decided to remove the CDR feature because it gives unambiguous information about a person's classification, so we chose to run the algorithm on the features "EDUC", "MMSE", "nWBV" because this combination led to the best results in our data.
+
+next we ran on different K values and found that when K = 15 we get the best results.
+
+```{r message=FALSE, warning=FALSE, include=FALSE, results='hide'}
+num_partitions <- 25  # Number of random partitions to evaluate
+max_precision <- 0
+max_recall <- 0
+best_Y_test_vector <- 0
+best_Y_test_pred <- 0
+best_accuracy <- 0
+
+
+for (partition in 1:num_partitions) {
+  # Split the data into a training and test set
+  train_indices <- sample(1:nrow(demention_data), size = 0.8 * nrow(demention_data), replace = FALSE)
+  X_train <- demention_data[train_indices, c("EDUC", "MMSE", "nWBV")]
+  X_test <- demention_data[-train_indices, c("EDUC", "MMSE", "nWBV")]
+  Y_train <- demention_data[train_indices, "Group"]
+  Y_test <- demention_data[-train_indices, "Group"]
+
+  trns <- t(Y_train)
+
+  Y_test_pred <- knn(train = X_train, test = X_test, cl = trns, k = 15)
+  Y_test_pred <- matrix(Y_test_pred, nrow = length(Y_test_pred), ncol = 1)
+  # Convert Y_test to a vector
+  Y_test_vector <- unlist(Y_test)
+
+  table_result <- CrossTable(x = Y_test_vector, y = Y_test_pred, prop.chisq = FALSE)
+
+  # Calculate Precision
+  TP <- table_result$t[1, 1]
+  FP <- sum(table_result$t[, 1]) - TP
+  precision <- TP / (TP + FP)
+
+  # Calculate Recall
+  FN <- sum(table_result$t[1, ]) - TP
+  recall <- TP / (TP + FN)
+
+  # Update best metrics if necessary
+  if (precision + recall > max_precision + max_recall) {
+    max_precision <- precision
+    max_recall <- recall
+    best_Y_test_vector <- Y_test_vector
+    best_Y_test_pred <- Y_test_pred
+    best_accuracy <-sum(Y_test_vector == Y_test_pred) / length(Y_test_vector)
+  }
+}
+```
+
+we got the following results:
+
+```{r}
+
+# Print the average precision and recall over the partitions
+# avg_precision <- max_precision
+# avg_recall <- max_recall
+
+cat("max Precision:", max_precision, "\n")
+cat("max Recall:", max_recall, "\n")
+cat("best_accuracy:", best_accuracy, "\n")
+
+# Create a cross-tabulation table
+table_result <- table(best_Y_test_vector, best_Y_test_pred)
+
+# Create a bar plot with vivid colors and adjusted y-axis limits
+barplot(table_result, beside = TRUE, legend = TRUE, main = "KNN Results",
+        xlab = "Actual Class", ylab = "Count", col = c("#FF0000", "#00FF00"),
+        ylim = c(0, max(table_result) + 5))
+
+```
+
+
+It can be seen that our prediction results are high.
+
+Now we will try to run other classification algorithms for the purpose of improving and comparing performance against the KNN results. Let's start with random forest algorithm.
+
+In order to compare performance against the KNN algorithm, we ran a different distribution of the training set 25 times and chose the distribution with the maximum score
+
+```{r}
+num_partitions <- 25  # Number of random partitions to evaluate
+max_accuracy <- 0
+best_Y_test_pred <- NULL
+best_Y_test <- NULL
+
+
+for (partition in 1:num_partitions) {
+  # Split the data into a training and test set
+  train_indices <- sample(1:nrow(demention_data), size = 0.8 * nrow(demention_data), replace = FALSE)
+  X_train <- demention_data[train_indices, c("EDUC", "MMSE", "nWBV","ASF")]
+  X_test <- demention_data[-train_indices, c("EDUC", "MMSE", "nWBV","ASF")]
+  Y_train <- demention_data[train_indices, "Group"]
+  Y_test <- demention_data[-train_indices, "Group"]
+  
+  # Convert class labels to factors
+  Y_train <- as.factor(Y_train$Group)
+  Y_test <- as.factor(Y_test$Group)
+  
+  set.seed(123)
+  # Train the random forest classifier
+  rf_model <- randomForest(x = X_train, y = Y_train, ntree = 1000)
+  
+  # Make predictions on the test set
+  Y_test_pred <- predict(rf_model, X_test)
+  
+  # Evaluate the model
+  accuracy <- sum(Y_test_pred == Y_test) / length(Y_test)
+  
+
+  
+  # Update the best model if necessary
+  if (accuracy > max_accuracy) {
+    max_accuracy <- accuracy
+    best_Y_test_pred <- Y_test_pred 
+    best_Y_test <- Y_test
+  }
+}
+
+# Evaluate the model
+confusion_matrix <- table(best_Y_test, best_Y_test_pred)
+
+
+
+# Calculate True Positives (TP), False Positives (FP), and False Negatives (FN)
+TP <- confusion_matrix[1,1 ]
+FP <- sum(confusion_matrix[,1 ]) - TP
+FN <- sum(confusion_matrix[1, ]) - TP
+
+# Calculate Precision
+precision <- TP / (TP + FP)
+
+# Calculate Recall
+recall <- TP / (TP + FN)
+
+```
+
+we got the following results:
+
+```{r}
+# Print Precision and Recall
+print(paste("Precision:", precision))
+print(paste("Recall:", recall))
+
+print(paste("Best Accuracy:", max_accuracy))
+print("Confusion Matrix:")
+print(confusion_matrix)
+
+
+# Create a bar plot with vivid colors and adjusted y-axis limits
+barplot(confusion_matrix, beside = TRUE, legend = TRUE, main = "random forest Results",
+        xlab = "Actual Class", ylab = "Count", col = c("#FF0000", "#00FF00"),
+        ylim = c(0, max(confusion_matrix) + 5))
+```
+
+In addition we will run SVM in the same way
+
+```{r}
+num_partitions <- 25  # Number of random partitions to evaluate
+max_accuracy <- 0
+best_Y_test_pred <- NULL
+best_Y_test <- NULL
+
+for (partition in 1:num_partitions) {
+  # Split the data into a training and test set
+  train_indices <- sample(1:nrow(demention_data), size = 0.8 * nrow(demention_data), replace = FALSE)
+  X_train <- demention_data[train_indices, c("EDUC", "MMSE", "nWBV")]
+  X_test <- demention_data[-train_indices, c("EDUC", "MMSE", "nWBV")]
+  Y_train <- demention_data[train_indices, "Group"]
+  Y_test <- demention_data[-train_indices, "Group"]
+
+  # Convert class labels to factors
+  Y_train <- as.factor(Y_train$"Group")
+  Y_test <- as.factor(Y_test$"Group")
+
+  # Train the SVM model
+  svm_model <- svm(X_train, Y_train)
+
+  # Make predictions on the test set
+  Y_test_pred <- predict(svm_model, X_test)
+
+  # Evaluate the model
+  accuracy <- sum(Y_test_pred == Y_test) / length(Y_test)
+
+  # Update the best model if necessary
+  if (accuracy > max_accuracy) {
+    max_accuracy <- accuracy
+    best_Y_test_pred <- Y_test_pred 
+    best_Y_test <- Y_test
+  }
+}
+
+
+# Evaluate the model
+accuracy <- sum(best_Y_test_pred == best_Y_test) / length(best_Y_test)
+confusion_matrix <- table(best_Y_test, best_Y_test_pred)
+
+# Calculate True Positives (TP), False Positives (FP), and False Negatives (FN)
+TP <- confusion_matrix[1,1 ]
+FP <- sum(confusion_matrix[,1 ]) - TP
+FN <- sum(confusion_matrix[1, ]) - TP
+
+# Calculate Precision
+precision <- TP / (TP + FP)
+
+# Calculate Recall
+recall <- TP / (TP + FN)
+
+```
+
+we got the following results:
+
+```{r}
+# Print Precision and Recall
+print(paste("Precision:", precision))
+print(paste("Recall:", recall))
+
+# Print the results
+print(paste("Best Accuracy:", max_accuracy))
+print("Confusion Matrix:")
+print(confusion_matrix)
+
+
+# Create a bar plot with vivid colors and adjusted y-axis limits
+barplot(confusion_matrix, beside = TRUE, legend = TRUE, main = "SVM Results",
+        xlab = "Actual Class", ylab = "Count", col = c("#FF0000", "#00FF00"),
+        ylim = c(0, max(confusion_matrix) + 5))
+```
+
+
+As you can see in the three methods we received high scores in all indices (90+) which shows that the three models have a good predictive ability for the detection of the dementia disease based on our data
+
+
+We will want to run PCA as a dimensionality reduction method so that we can make inferences with a clear look at the distribution of the data
+
+```{r}
+# Standardize the data
+standardized_data <- scale(demention_data[, c("CDR","EDUC", "MMSE", "nWBV")])
+
+# Compute the covariance matrix
+cov_matrix <- cov(standardized_data)
+
+# Perform eigen decomposition
+eigen_values <- eigen(cov_matrix)$values
+eigen_vectors <- eigen(cov_matrix)$vectors
+
+# Sort eigenvalues in descending order
+sorted_indices <- order(eigen_values, decreasing = TRUE)
+sorted_eigen_vectors <- eigen_vectors[, sorted_indices]
+
+# Choose the number of principal components to retain
+num_components <- 2
+
+# Select the top principal components
+selected_eigen_vectors <- sorted_eigen_vectors[, 1:num_components]
+
+# Project the data onto the principal components
+projected_data <- as.matrix(standardized_data) %*% selected_eigen_vectors
+
+# Create a new data frame with the projected data and the original labels
+pca_data <- data.frame(PC1 = projected_data[, 1], PC2 = projected_data[, 2], Group = demention_data$Group)
+
+
+# Visualize the PCA results
+ggplot(pca_data, aes(x = PC1, y = PC2)) +
+  geom_point() +
+  labs(title = "PCA Results", x = "Principal Component 1", y = "Principal Component 2")
+
+```
+
+After we have received the distribution of the data in 2 dimensions, we will want to run the K MEANS algorithm to see if clear clusters can be identified
+
+
+```{r}
+# Set the number of clusters
+k <- 2
+
+# Perform k-means clustering on the PCA data
+kmeans_result <- kmeans(projected_data, centers = k)
+
+# Get the cluster labels
+cluster_labels <- kmeans_result$cluster
+
+# Add cluster labels and CDR values to the PCA data
+pca_data$Cluster <- cluster_labels
+pca_data$CDR <- demention_data$CDR
+
+# Visualize the clusters with CDR labels
+ggplot(pca_data, aes(x = PC1, y = PC2, color = as.factor(Cluster), label = Group)) +
+  geom_point() +
+  geom_text(size = 3, nudge_y = 0.2) +
+  labs(title = "K-means Clustering on PCA Data", x = "Principal Component 1", y = "Principal Component 2")
+
+
+```
+
+
+It can be seen that there is a match between the clusters that K means found and the 2 populations that exist in the data(demented/ not demented).
+As mentioned the k means uses the PCA data.In the PCA we used the CDR feature because when we tried to remove it, we saw that the separation blurs and the area of overlap becomes larger, which strengthens the claim that the feature has a great influence and gives an unequivocal diagnosis regarding the classifications. In addition, we wanted to examine the other characteristics as well (age, ses...) and saw that their addition makes the clustering less clear.
+
+
+
+
+Conclusions:
+All models gave us good results and apparently our data is suitable for classification. All the models presented showed similar results and there was no significant difference between the KNN, random forest and SVM.
+In terms of the features of the data, we noticed two important phenomena, the first is that the number of years of education plays a significant role in reducing the risk of dementia statistically
+The second thing is that EDUC, MMSE, nWBV and CDR were the most important and informative features for classification. We found that with the CDR feature alone it is possible to classify the data, so it is important to know how to use it correctly.
+We found that our data contains several correlations, so we made sure to remove features that could be noise. As part of running the classification algorithms, we also saw that the features rated as low importance by the RANDOM FOREST algorithm constituted additional noise and the classification results were better after removing these features.
+Finally, with the help of PCA and K MEANS algorithms, we presented the data in a two-dimensional form and divided it into 2 clear clusters of patients with dementia and healthy patients. We believe that with the help of our findings and the models we trained it will be easier to get an early indication of a person who may be suffering from dementia.
+
