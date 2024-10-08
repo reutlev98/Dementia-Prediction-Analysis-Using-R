@@ -67,8 +67,8 @@ The dataset includes the following features:
   - For **demented individuals**, the model achieved a classification accuracy of 76%, indicating room for improvement in identifying dementia cases.
 
   <div style="display: flex;">
-  <img src="https://github.com/user-attachments/assets/0a103788-dec2-4f2b-aa06-c0c55fadce3c" alt="image" width="400"/>
-  <img src="https://github.com/user-attachments/assets/995d9035-7e0e-44c3-9b6b-183e0ceac5fa" alt="image" width="400"/>
+  <img src="https://github.com/user-attachments/assets/0a103788-dec2-4f2b-aa06-c0c55fadce3c" alt="image" width="300"/>
+  <img src="https://github.com/user-attachments/assets/995d9035-7e0e-44c3-9b6b-183e0ceac5fa" alt="image" width="300"/>
   </div>
 
 
